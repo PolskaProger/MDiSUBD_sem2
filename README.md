@@ -130,442 +130,226 @@ SELECT CalculateTotalBonus(5000, 10) FROM DUAL; -- 66000
 ```
 # Лабораторная работа №2
 
-## Шаг 1: Создание временных таблиц
+# Шаги по созданию таблиц и триггеров
 
-```sql
-CREATE GLOBAL TEMPORARY TABLE TEMP_DELETED_GROUPS (
-    GROUP_ID NUMBER,
-    GROUP_NAME VARCHAR2(50)
-) ON COMMIT DELETE ROWS;
-
-CREATE GLOBAL TEMPORARY TABLE TEMP_GROUP_CHANGES (
-    GROUP_ID NUMBER,
-    OPERATION VARCHAR2(10)
-) ON COMMIT DELETE ROWS;
-```
-
-## Шаг 2: Создание таблицы GROUPS
-
-```sql
-CREATE TABLE GROUPS (
-    ID NUMBER NOT NULL ENABLE,
-    NAME VARCHAR2(50) NOT NULL ENABLE,
-    C_VAL NUMBER,
-    CONSTRAINT PK_GROUPS PRIMARY KEY (ID)
-);
-```
-
-## Шаг 3: Создание таблицы STUDENTS
+## 1. Создание таблиц STUDENTS и GROUPS
 
 ```sql
 CREATE TABLE STUDENTS (
-    ID NUMBER NOT NULL ENABLE,
-    NAME VARCHAR2(50) NOT NULL ENABLE,
-    GROUP_ID NUMBER NOT NULL ENABLE,
-    CONSTRAINT PK_STUDENTS PRIMARY KEY (ID)
-);
-```
-
-## Шаг 4: Создание таблицы STUDENT_LOG
-
-```sql
-CREATE TABLE STUDENT_LOG (
-    LOG_ID NUMBER PRIMARY KEY,
-    ACTION_TYPE VARCHAR2(10),
-    STUDENT_ID NUMBER,
-    STUDENT_NAME VARCHAR2(50),
+    ID NUMBER PRIMARY KEY,
+    NAME VARCHAR2 (50),
     GROUP_ID NUMBER,
-    GROUP_NAME VARCHAR2(50),
-    ACTION_TIME TIMESTAMP DEFAULT SYSTIMESTAMP
+    CONSTRAINT fk_group_id FOREIGN KEY (GROUP_ID) REFERENCES GROUPS (ID) ON DELETE CASCADE
+);
+
+CREATE TABLE GROUPS (
+    ID NUMBER PRIMARY KEY,
+    NAME VARCHAR2 (50),
+    C_VAL NUMBER,
+    CONSTRAINT unique_group_name UNIQUE (NAME)
 );
 ```
 
-## Шаг 5: Создание последовательности для STUDENT_LOG
+## 2. Триггеры
+
+### Триггер для обеспечения уникальности поля ID в таблице STUDENTS
 
 ```sql
-CREATE SEQUENCE STUDENT_LOG_SEQ
-    START WITH 1
-    INCREMENT BY 1
-    NOCACHE
-    NOCYCLE;
+CREATE OR REPLACE TRIGGER trg_unique_id
+BEFORE INSERT ON STUDENTS
+FOR EACH ROW
+DECLARE
+    id_count NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO id_count FROM STUDENTS WHERE ID = :NEW.ID;
+    IF id_count > 0 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'ID must be unique in the STUDENTS table');
+    END IF;
+END;
+/
 ```
 
-## Шаг 6: Триггер для автоинкремента ID в таблице GROUPS
+### Триггер для автоматического увеличения ID в таблице STUDENTS
 
 ```sql
-CREATE OR REPLACE TRIGGER AUTO_INCREMENT_ID_GROUPS
+CREATE SEQUENCE students_seq START WITH 1 INCREMENT BY 1;
+
+CREATE OR REPLACE TRIGGER trg_autoincrement_id
+BEFORE INSERT ON STUDENTS
+FOR EACH ROW
+BEGIN
+    IF :NEW.ID IS NULL THEN
+        SELECT students_seq.NEXTVAL INTO :NEW.ID FROM DUAL;
+    END IF;
+END;
+/
+```
+
+### Триггер для обеспечения уникальности поля NAME в таблице GROUPS
+
+```sql
+CREATE OR REPLACE TRIGGER trg_unique_group_name
 BEFORE INSERT ON GROUPS
 FOR EACH ROW
+DECLARE
+    name_count NUMBER;
 BEGIN
-    IF :NEW.id IS NULL THEN
-        SELECT NVL(MAX(id), 0) + 1 INTO :NEW.id FROM GROUPS;
+    SELECT COUNT(*) INTO name_count FROM GROUPS WHERE NAME = :NEW.NAME;
+    IF name_count > 0 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'Group name must be unique in the GROUPS table');
     END IF;
-END AUTO_INCREMENT_ID_GROUPS;
-/
-```
-
-## Шаг 7: Триггер для автоинкремента ID в таблице STUDENTS
-
-```sql
-CREATE OR REPLACE TRIGGER AUTO_INCREMENT_ID_STUDENTS
-BEFORE INSERT ON STUDENTS
-FOR EACH ROW
-BEGIN
-    IF :NEW.id IS NULL THEN
-        SELECT NVL(MAX(id), 0) + 1 INTO :NEW.id FROM STUDENTS;
-    END IF;
-END AUTO_INCREMENT_ID_STUDENTS;
-/
-```
-
-## Шаг 8: Триггер для проверки уникальности имени группы
-
-```sql
-CREATE OR REPLACE TRIGGER CHECK_UNIQUE_NAME_GROUP
-BEFORE INSERT OR UPDATE ON GROUPS
-FOR EACH ROW
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('Проверка группы: ID = ' || :NEW.ID || ', NAME = ' || :NEW.NAME);
-
-    IF :NEW.NAME IS NULL THEN
-        RAISE_APPLICATION_ERROR(-20001, 'Имя группы не может быть NULL');
-    END IF;
-
-    IF :NEW.ID IS NULL THEN
-        RAISE_APPLICATION_ERROR(-20003, 'ID группы не может быть NULL');
-    END IF;
-
-    -- Проверка уникальности имени группы
-    FOR rec IN (SELECT 1 FROM GROUPS WHERE NAME = :NEW.NAME AND ID != :NEW.ID) LOOP
-        RAISE_APPLICATION_ERROR(-20002, 'Имя группы должно быть уникальным');
-    END LOOP;
 END;
 /
 ```
 
-## Шаг 9: Триггер для журналирования удаления студента
+### Триггер для реализации отношения внешнего ключа с каскадным удалением между таблицами STUDENTS и GROUPS
 
 ```sql
-CREATE OR REPLACE TRIGGER LOG_DELETE_STUDENT
-BEFORE DELETE ON STUDENTS
-FOR EACH ROW
-DECLARE
-    v_group_name VARCHAR2(50); -- Переменная для хранения имени группы
-BEGIN
-    -- Проверяем, была ли удалена группа для этого студента
+CREATE OR REPLACE TRIGGER trg_cascade_delete
+FOR DELETE ON GROUPS
+COMPOUND TRIGGER
+    TYPE ids_t IS TABLE OF NUMBER;
+    ids ids_t := ids_t();
+
+    BEFORE STATEMENT IS
     BEGIN
-        -- Читаем имя группы из временной таблицы temp_deleted_groups_names
-        SELECT t.group_name
-        INTO v_group_name
-        FROM temp_deleted_groups t
-        WHERE t.group_id = :OLD.group_id;
-    EXCEPTION
-        WHEN NO_DATA_FOUND THEN
-           -- Если имя группы нигде не найдено, записываем "UNKNOWN"
-                    v_group_name := 'UNKNOWN GROUP' || :OLD.group_id;
-    END;
+        ids.DELETE;
+    END BEFORE STATEMENT;
 
-    -- Вставка записи в STUDENT_LOG с автоинкрементом log_id и именем группы
-    INSERT INTO STUDENT_LOG (log_id, action_type, student_id, student_name, group_id, group_name)
-    VALUES (student_log_seq.NEXTVAL, 'DELETE', :OLD.id, :OLD.name, :OLD.group_id, v_group_name);
+    BEFORE EACH ROW IS
+    BEGIN
+        ids.EXTEND;
+        ids(ids.COUNT) := :OLD.ID;
+    END BEFORE EACH ROW;
 
-END;
+    AFTER STATEMENT IS
+    BEGIN
+        FOR i IN 1..ids.COUNT LOOP
+            DELETE FROM STUDENTS WHERE GROUP_ID = ids(i);
+        END LOOP;
+    END AFTER STATEMENT;
+END trg_cascade_delete;
 /
 ```
 
-## Шаг 10: Триггер для журналирования вставки студента
+### Триггер для ведения журнала всех действий манипуляций с данными в таблице STUDENTS
 
 ```sql
-CREATE OR REPLACE TRIGGER LOG_INSERT_STUDENT
-AFTER INSERT ON STUDENTS
+CREATE TABLE STUDENTS_AUDIT (
+    LOG_ID NUMBER PRIMARY KEY,
+    OPERATION VARCHAR2 (50),
+    STUDENT_ID NUMBER,
+    STUDENT_NAME VARCHAR2 (100),
+    GROUP_ID NUMBER,
+    TIMESTAMP TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+CREATE OR REPLACE TRIGGER trg_students_audit
+BEFORE INSERT OR UPDATE OR DELETE ON STUDENTS
 FOR EACH ROW
-DECLARE
-    v_group_name VARCHAR2(100); -- Переменная для хранения имени группы
 BEGIN
-     -- Получаем имя группы из таблицы GROUPS
-    SELECT name
-    INTO v_group_name
-    FROM GROUPS
-    WHERE id = :NEW.group_id;
-
-    -- Вставка записи в STUDENT_LOG с автоинкрементом log_id
-    INSERT INTO STUDENT_LOG (log_id, action_type, student_id, student_name, group_id, group_name)
-    VALUES (student_log_seq.NEXTVAL, 'INSERT', :NEW.id, :NEW.name, :NEW.group_id, v_group_name);
-END;
-/
-```
-
-## Шаг 11: Триггер для журналирования обновления студента
-
-```sql
-CREATE OR REPLACE TRIGGER LOG_UPDATE_STUDENT
-AFTER UPDATE ON STUDENTS
-FOR EACH ROW
-DECLARE
-    v_group_name VARCHAR2(100); -- Переменная для хранения имени группы
-BEGIN
-     -- Получаем имя группы из таблицы GROUPS
-    SELECT name
-    INTO v_group_name
-    FROM GROUPS
-    WHERE id = :OLD.group_id;
-    -- Вставка записи в STUDENT_LOG с автоинкрементом log_id
-    INSERT INTO STUDENT_LOG (log_id, action_type, student_id, student_name, group_id, group_name)
-    VALUES (student_log_seq.NEXTVAL, 'UPDATE', :OLD.id, :OLD.name, :OLD.group_id, v_group_name);
-END;
-/
-```
-
-## Шаг 12: Триггер для проверки существования группы перед вставкой студента
-
-```sql
-CREATE OR REPLACE TRIGGER TRG_CHECK_GROUP_BEFORE_INSERT
-BEFORE INSERT ON STUDENTS
-FOR EACH ROW
-DECLARE
-    v_count NUMBER;
-BEGIN
-
-    SELECT COUNT(*) INTO v_count FROM GROUPS WHERE ID = :NEW.group_id;
-
-    IF v_count = 0 THEN
-        RAISE_APPLICATION_ERROR(-20001, 'Ошибка: Группа ' || :NEW.group_id || ' не существует.');
+    IF INSERTING THEN
+        INSERT INTO STUDENTS_AUDIT (LOG_ID, OPERATION, STUDENT_ID, STUDENT_NAME, GROUP_ID)
+        VALUES ((SELECT NVL(MAX(LOG_ID), 0) + 1 FROM STUDENTS_AUDIT), 'INSERT', :NEW.ID, :NEW.NAME, :NEW.GROUP_ID);
+    ELSIF UPDATING THEN
+        INSERT INTO STUDENTS_AUDIT (LOG_ID, OPERATION, STUDENT_ID, STUDENT_NAME, GROUP_ID)
+        VALUES ((SELECT NVL(MAX(LOG_ID), 0) + 1 FROM STUDENTS_AUDIT), 'UPDATE', :NEW.ID, :NEW.NAME, :NEW.GROUP_ID);
+    ELSIF DELETING THEN
+        INSERT INTO STUDENTS_AUDIT (LOG_ID, OPERATION, STUDENT_ID, STUDENT_NAME, GROUP_ID)
+        VALUES ((SELECT NVL(MAX(LOG_ID), 0) + 1 FROM STUDENTS_AUDIT), 'DELETE', :OLD.ID, :OLD.NAME, :OLD.GROUP_ID);
     END IF;
 END;
 /
 ```
 
-## Шаг 13: Триггер для вставки удаленной группы во временную таблицу
+## 3. Хранимая процедура для восстановления данных с временным смещением
 
 ```sql
-CREATE OR REPLACE TRIGGER TRG_INSERT_DELETED_GROUP
-BEFORE DELETE ON GROUPS
-FOR EACH ROW
+CREATE OR REPLACE PROCEDURE restore_data(
+    p_date IN DATE DEFAULT NULL,
+    p_offset IN NUMBER DEFAULT NULL
+) IS
+    v_target_date DATE;
 BEGIN
-  DBMS_OUTPUT.PUT_LINE('trg_insert_deleted_group ');... -- Записываем ID удаленной группы в временную таблицу
-  INSERT INTO temp_deleted_groups (group_id, group_name)
-  VALUES (:OLD.id, :OLD.name);
-END;
-/
-```
+    IF p_date IS NOT NULL THEN
+        v_target_date := p_date;
+    ELSIF p_offset IS NOT NULL THEN
+        v_target_date := SYSDATE - (p_offset / 1440);
+    ELSE
+        RAISE_APPLICATION_ERROR(-20004, 'INVALID DATA');
+    END IF;
 
-## Шаг 14: Триггер для удаления студентов при удалении группы (каскадное удаление)
-
-```sql
-CREATE OR REPLACE TRIGGER TRG_DELETE_STUDENTS
-AFTER DELETE ON GROUPS
-DECLARE
-  CURSOR c IS
-    -- Выбираем студентов, у которых group_id соответствует удаленной группе
-    SELECT id FROM STUDENTS WHERE group_id IN (SELECT group_id FROM temp_deleted_groups);
-BEGIN
-  -- Удаляем всех студентов, чьи group_id совпадают с удаленной группой
-  FOR r IN c LOOP
-    DELETE FROM STUDENTS WHERE id = r.id;
-  END LOOP;
-
-  -- Очистка временной таблицы после удаления студентов
-
-END;
-/
-```
-
-## Шаг 15: Триггер для обновления счетчика студентов в группе
-
-```sql
-CREATE OR REPLACE TRIGGER TRG_RECALCULATE_GROUP_COUNT
-AFTER INSERT OR UPDATE OR DELETE ON STUDENTS
-DECLARE
-  CURSOR c IS SELECT DISTINCT group_id FROM temp_group_changes;
-  v_count NUMBER;
-BEGIN
-  -- Для каждой группы, которая изменилась, пересчитываем количество студентов
-  FOR r IN c LOOP
-    SELECT COUNT(*) INTO v_count
-    FROM STUDENTS
-    WHERE group_id = r.group_id;
-
-    -- Обновляем количество студентов в таблице GROUPS
-    UPDATE GROUPS
-    SET c_val = v_count
-    WHERE id = r.group_id;
-  END LOOP;
-
-  -- Очищаем временную таблицу после пересчета
-  DELETE FROM temp_group_changes;
-END;
-/
-```
-
-## Шаг 16: Триггер для отслеживания изменений в таблице STUDENTS
-
-```sql
-CREATE OR REPLACE TRIGGER TRG_UPDATE_GROUP_COUNT
-AFTER INSERT OR UPDATE OR DELETE ON STUDENTS
-FOR EACH ROW
-BEGIN
-  -- Добавляем изменения в временную таблицу
-  IF INSERTING OR UPDATING THEN
-    INSERT INTO temp_group_changes (group_id, operation)
-    VALUES (:NEW.group_id, 'INSERT');
-    INSERT INTO temp_group_changes (group_id, operation)
-    VALUES (:OLD.group_id, 'INSERT');
-  ELSIF DELETING THEN
-    INSERT INTO temp_group_changes (group_id, operation)
-    VALUES (:OLD.group_id, 'DELETE');
-  END IF;
-END;
-/
-```
-
-## Шаг 17: Процедура для восстановления данных студентов
-
-```sql
-CREATE OR REPLACE PROCEDURE restore_students_data(
-    p_time IN TIMESTAMP,
-    p_time_shift IN INTERVAL DAY TO SECOND DEFAULT INTERVAL '0' DAY
-)
-AS
-    v_target_time TIMESTAMP;
-    v_count NUMBER;  -- Объявляем переменную здесь
-BEGIN
-    DELETE FROM STUDENTS;
-
-    -- Вычисляем целевое время для восстановления
-    v_target_time := p_time + p_time_shift;
-
-    DBMS_OUTPUT.PUT_LINE(v_target_time);
-
-    -- Восстановление по времени
-    FOR record IN (
-        SELECT ACTION_TYPE, STUDENT_ID, STUDENT_NAME, GROUP_ID, ACTION_TIME, GROUP_NAME
-        FROM STUDENT_LOG
-        WHERE action_time <= v_target_time
-        ORDER BY action_time
+    FOR rec IN (
+        SELECT *
+        FROM STUDENTS_AUDIT
+        WHERE TIMESTAMP <= v_target_date
+        ORDER BY TIMESTAMP DESC
     ) LOOP
-       IF record.action_type = 'INSERT' THEN
-        -- Проверяем наличие группы с таким ID
-        SELECT COUNT(*) INTO v_count
-        FROM GROUPS
-        WHERE id = record.group_id;
-
-        -- Если группы нет, создаем новую
-        IF v_count = 0 THEN
-            INSERT INTO GROUPS (id, name, c_val)
-            VALUES (record.group_id, record.group_name, 0);
-        END IF;
-
-        -- Вставляем студента
-        INSERT INTO STUDENTS (id, name, group_id)
-        VALUES (record.student_id, record.student_name, record.group_id);
-
-
-        ELSIF record.action_type = 'DELETE' THEN
-            DELETE FROM STUDENTS 
-            WHERE id = record.student_id;
-
-            -- -- Обновляем количество студентов в группе
-            -- UPDATE GROUPS
-            -- SET students_count = students_count - 1
-            -- WHERE id = record.group_id;
-
-        ELSE
-         -- Проверяем наличие группы с таким ID
-            SELECT COUNT(*) INTO v_count
-            FROM GROUPS
-            WHERE id = record.group_id;
-
-            -- Если группы нет, создаем новую
-            IF v_count = 0 THEN
-                INSERT INTO GROUPS (id, name, c_val)
-                VALUES (record.group_id, 'New Group ' || record.group_id, 0);
-            END IF;
-
+        IF rec.OPERATION = 'INSERT' THEN
+            DELETE FROM STUDENTS WHERE ID = rec.STUDENT_ID;
+        ELSIF rec.OPERATION = 'UPDATE' THEN
             UPDATE STUDENTS
-            SET name = record.student_name,
-                group_id = record.group_id
-            WHERE id = record.student_id;
+            SET NAME = rec.STUDENT_NAME, GROUP_ID = rec.GROUP_ID
+            WHERE ID = rec.STUDENT_ID;
+        ELSIF rec.OPERATION = 'DELETE' THEN
+            INSERT INTO STUDENTS (ID, NAME, GROUP_ID)
+            VALUES (rec.STUDENT_ID, rec.STUDENT_NAME, rec.GROUP_ID);
         END IF;
     END LOOP;
-
     COMMIT;
-END restore_students_data;
+END;
 /
 ```
 
-## Шаг 18: SQL-коды для тестирования
-
-1.  **Проверка автоинкремента:**
+## 4. Триггер для обновления столбца C_VAL в таблице GROUPS при изменении данных в таблице STUDENTS
 
 ```sql
-    INSERT INTO GROUPS (NAME, C_VAL) VALUES ('Group A', 10);
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 1', 1);
-```
+CREATE OR REPLACE TRIGGER trg_update_c_val
+FOR INSERT OR UPDATE OR DELETE ON STUDENTS
+COMPOUND TRIGGER
+    total_students NUMBER;
 
-2.  **Проверка триггера уникальности имени группы:**
-
-```sql
-    INSERT INTO GROUPS (NAME, C_VAL) VALUES ('Group B', 5);
-    -- Эта вставка должна вызвать ошибку
-    INSERT INTO GROUPS (NAME, C_VAL) VALUES ('Group B', 8);
-```
-
-3.  **Проверка каскадного удаления:**
-
-```sql
-    INSERT INTO GROUPS (NAME, C_VAL) VALUES ('Group C', 12);
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 2', 3);
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 3', 3);
-
-    DELETE FROM GROUPS WHERE ID = 3;
-    -- Проверьте, что студенты Student 2 и Student 3 также удалены
-```
-
-4.  **Проверка журналирования:**
-
-```sql
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 4', 1);
-    UPDATE STUDENTS SET NAME = 'Updated Student 4' WHERE ID = 4;
-    DELETE FROM STUDENTS WHERE ID = 4;
-
-    SELECT * FROM STUDENT_LOG;
-```
-
-5.  **Проверка восстановления данных:**
-
-```sql
-    -- Вставляем данные
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 5', 2);
-    COMMIT;
-    -- Ждем немного
-    -- Обновляем данные
-    UPDATE STUDENTS SET NAME = 'Updated Student 5' WHERE ID = 5;
-    COMMIT;
-    -- Ждем немного
-    -- Удаляем данные
-    DELETE FROM STUDENTS WHERE ID = 5;
-    COMMIT;
-
-    -- Восстанавливаем данные на определенный момент времени
-    DECLARE
-        v_time TIMESTAMP := SYSTIMESTAMP - INTERVAL '1' MINUTE;
+    BEFORE STATEMENT IS
     BEGIN
-        RESTORE_STUDENTS_DATA(v_time);
-    END;
-    /
+        total_students := 0;
+    END BEFORE STATEMENT;
 
-    SELECT * FROM STUDENTS;
+    AFTER EACH ROW IS
+    BEGIN
+        IF INSERTING THEN
+            total_students := total_students + 1;
+        ELSIF UPDATING THEN
+            NULL;
+        ELSIF DELETING THEN
+            total_students := total_students - 1;
+        END IF;
+    END AFTER EACH ROW;
+
+    AFTER STATEMENT IS
+    BEGIN
+        FOR r IN (SELECT GROUP_ID, COUNT(*) AS num_students FROM STUDENTS GROUP BY GROUP_ID) LOOP
+            UPDATE GROUPS
+            SET C_VAL = r.num_students
+            WHERE ID = r.GROUP_ID;
+        END LOOP;
+    END AFTER STATEMENT;
+END trg_update_c_val;
+/
 ```
 
-6.  **Проверка обновления счетчика студентов в группе:**
+## 5. Тестирование таблиц
 
 ```sql
-    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Student 6', 1);
-    -- Проверьте, что C_VAL для Group A увеличился
-    UPDATE STUDENTS SET GROUP_ID = 2 WHERE ID = 6;
-    -- Проверьте, что C_VAL для Group A уменьшился, а для Group B увеличился
-    DELETE FROM STUDENTS WHERE ID = 6;
-    -- Проверьте, что C_VAL для Group B уменьшился
+INSERT INTO GROUPS (ID, NAME, C_VAL) VALUES (1, 'Group A', 0);
+INSERT INTO GROUPS (ID, NAME, C_VAL) VALUES (2, 'Group B', 0);
 
-    SELECT * FROM GROUPS;
+INSERT INTO STUDENTS (ID, NAME, GROUP_ID) VALUES (1, 'Student 1', 1);
+INSERT INTO STUDENTS (ID, NAME, GROUP_ID) VALUES (2, 'Student 2', 1);
+INSERT INTO STUDENTS (ID, NAME, GROUP_ID) VALUES (3, 'Student 3', 2);
+
+SELECT * FROM GROUPS;
+SELECT * FROM STUDENTS;
+SELECT * FROM STUDENTS_AUDIT;
+```
+```
 ```
